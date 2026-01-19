@@ -3,6 +3,7 @@ from PIL import Image
 import io
 import torch
 import traceback
+import os
 
 from app.model import get_model
 from app.utils import preprocess_image
@@ -13,6 +14,9 @@ from app.utils import preprocess_image
 app = FastAPI(title="BMI AI API")
 
 CLASS_NAMES = ["underweight", "normal", "overweight"]
+
+# ถ้าต่ำกว่าเกณฑ์นี้ => ถือว่า "รูปไม่ชัด/ไม่ใช่คน/วิเคราะห์ไม่ได้" -> ส่ง 422 ให้ฝั่งบอทบอกส่งรูปใหม่
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.45"))
 
 
 # =========================
@@ -65,7 +69,7 @@ async def predict(file: UploadFile = File(...)):
         if file.content_type and not file.content_type.startswith("image/"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid file type: {file.content_type}"
+                detail=f"Invalid file type: {file.content_type}. Please upload an image."
             )
 
         # 2) อ่านไฟล์
@@ -88,10 +92,13 @@ async def predict(file: UploadFile = File(...)):
         # 5) preprocess
         x = preprocess_image(image)
 
-        # debug log
-        print("✅ Input shape:", tuple(x.shape))
-        print("✅ Input dtype:", x.dtype)
-        print("✅ Input min/max:", float(x.min()), float(x.max()))
+        # debug log (พอประมาณ)
+        try:
+            print("✅ Input shape:", tuple(x.shape))
+            print("✅ Input dtype:", x.dtype)
+            print("✅ Input min/max:", float(x.min()), float(x.max()))
+        except Exception:
+            pass
 
         # 6) inference
         with torch.no_grad():
@@ -107,6 +114,13 @@ async def predict(file: UploadFile = File(...)):
             probs = torch.softmax(logits, dim=1)
             pred = int(torch.argmax(probs, dim=1).item())
             conf = float(probs[0, pred].item())
+
+            # ✅ ถ้า confidence ต่ำมาก -> ส่ง 422 ให้ client บอกผู้ใช้ส่งรูปใหม่
+            if conf < MIN_CONFIDENCE:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Cannot confidently analyze this image. Please send a clearer full-body human photo."
+                )
 
             class_name = (
                 CLASS_NAMES[pred]
