@@ -16,7 +16,7 @@ app = FastAPI(title="BMI AI API")
 CLASS_NAMES = ["underweight", "normal", "overweight"]
 
 # ถ้าต่ำกว่าเกณฑ์นี้ => ถือว่า "รูปไม่ชัด/ไม่ใช่คน/วิเคราะห์ไม่ได้" -> ส่ง 422 ให้ฝั่งบอทบอกส่งรูปใหม่
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.45"))
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 
 
 # =========================
