@@ -7,6 +7,7 @@ import os
 
 from app.model import get_model
 from app.utils import preprocess_image
+from app.face_detector import has_face   # ✅ เพิ่มตรวจใบหน้า
 
 # =========================
 # FastAPI App
@@ -15,7 +16,7 @@ app = FastAPI(title="BMI AI API")
 
 CLASS_NAMES = ["underweight", "normal", "overweight"]
 
-# ถ้าต่ำกว่าเกณฑ์นี้ => ถือว่า "รูปไม่ชัด/ไม่ใช่คน/วิเคราะห์ไม่ได้" -> ส่ง 422 ให้ฝั่งบอทบอกส่งรูปใหม่
+# confidence ต่ำกว่านี้ = รูปไม่ชัด / วิเคราะห์ไม่ได้
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 
 
@@ -37,12 +38,7 @@ def health():
 # =========================
 def _extract_tensor(output):
     """
-    TorchScript บางโมเดล return:
-    - Tensor
-    - (Tensor,)
-    - [Tensor]
-    - dict ที่มี Tensor
-    ฟังก์ชันนี้จะดึง Tensor ออกมาให้แน่นอน
+    รองรับ TorchScript output หลายรูปแบบ
     """
     if isinstance(output, torch.Tensor):
         return output
@@ -69,7 +65,7 @@ async def predict(file: UploadFile = File(...)):
         if file.content_type and not file.content_type.startswith("image/"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid file type: {file.content_type}. Please upload an image."
+                detail="Invalid file type. Please upload an image."
             )
 
         # 2) อ่านไฟล์
@@ -86,13 +82,22 @@ async def predict(file: UploadFile = File(...)):
                 detail="Cannot open image. Please upload a valid JPG/PNG file."
             )
 
-        # 4) โหลดโมเดล (cached)
+        # =========================
+        # ❗ STEP สำคัญ: ตรวจใบหน้า
+        # =========================
+        if not has_face(image):
+            raise HTTPException(
+                status_code=422,
+                detail="No human face detected. Please send a clear face photo."
+            )
+
+        # 4) โหลดโมเดล (cache)
         model = get_model()
 
         # 5) preprocess
         x = preprocess_image(image)
 
-        # debug log (พอประมาณ)
+        # debug log
         try:
             print("✅ Input shape:", tuple(x.shape))
             print("✅ Input dtype:", x.dtype)
@@ -109,17 +114,19 @@ async def predict(file: UploadFile = File(...)):
         if logits.dim() == 1:
             logits = logits.unsqueeze(0)
 
-        # 8) classification (หลายคลาส)
+        # =========================
+        # 8) Classification
+        # =========================
         if logits.dim() == 2 and logits.shape[1] > 1:
             probs = torch.softmax(logits, dim=1)
             pred = int(torch.argmax(probs, dim=1).item())
             conf = float(probs[0, pred].item())
 
-            # ✅ ถ้า confidence ต่ำมาก -> ส่ง 422 ให้ client บอกผู้ใช้ส่งรูปใหม่
+            # confidence ต่ำ → ไม่รับ
             if conf < MIN_CONFIDENCE:
                 raise HTTPException(
                     status_code=422,
-                    detail="Cannot confidently analyze this image. Please send a clearer full-body human photo."
+                    detail="Low confidence. Please send a clearer face photo."
                 )
 
             class_name = (
@@ -134,7 +141,9 @@ async def predict(file: UploadFile = File(...)):
                 "confidence": conf
             }
 
-        # 9) regression (เผื่อโมเดลคืนค่าเดียว)
+        # =========================
+        # 9) Regression fallback
+        # =========================
         value = float(logits.squeeze().item())
         return {"value": value}
 
