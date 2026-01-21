@@ -14,10 +14,10 @@ from app.face_detector import count_faces
 # =========================
 app = FastAPI(title="BMI AI API")
 
-# 🔴 ต้องให้ตรงกับโมเดลของคุณ
+# ⚠️ ต้องให้จำนวน class ตรงกับโมเดล
 CLASS_NAMES = ["underweight", "normal", "overweight"]
 
-# confidence ต่ำกว่านี้ = ไม่รับผล
+# confidence ต่ำกว่านี้ = เตือน (แต่ไม่ reject)
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 
 
@@ -81,21 +81,10 @@ async def predict(file: UploadFile = File(...)):
             )
 
         # =========================
-        # ❗ ตรวจใบหน้า (สำคัญมาก)
+        # 🔍 ตรวจใบหน้า (ไม่ reject)
         # =========================
-        faces = count_faces(image)
-
-        if faces == 0:
-            raise HTTPException(
-                status_code=422,
-                detail="No human face detected. Please send a clear face photo."
-            )
-
-        if faces > 1:
-            raise HTTPException(
-                status_code=422,
-                detail="Multiple faces detected. Please send a single-person photo."
-            )
+        face_count = count_faces(image)
+        has_face = face_count >= 1
 
         # =========================
         # 4) โหลดโมเดล
@@ -114,7 +103,7 @@ async def predict(file: UploadFile = File(...)):
             logits = logits.unsqueeze(0)
 
         # =========================
-        # 7) Classification เท่านั้น
+        # 7) Classification
         # =========================
         if logits.dim() != 2 or logits.shape[1] < 2:
             raise HTTPException(
@@ -126,22 +115,22 @@ async def predict(file: UploadFile = File(...)):
         pred = int(torch.argmax(probs, dim=1).item())
         conf = float(probs[0, pred].item())
 
-        if conf < MIN_CONFIDENCE:
-            raise HTTPException(
-                status_code=422,
-                detail="Low confidence. Please send a clearer face photo."
-            )
-
         class_name = (
             CLASS_NAMES[pred]
             if pred < len(CLASS_NAMES)
             else f"class_{pred}"
         )
 
+        # =========================
+        # ✅ ส่งผลลัพธ์เสมอ
+        # =========================
         return {
             "class_id": pred,
             "class_name": class_name,
-            "confidence": conf
+            "confidence": conf,
+            "has_face": has_face,
+            "face_count": face_count,
+            "low_confidence": conf < MIN_CONFIDENCE
         }
 
     except HTTPException:
