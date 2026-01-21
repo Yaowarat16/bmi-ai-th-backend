@@ -7,29 +7,26 @@ import os
 
 from app.model import get_model
 from app.utils import preprocess_image
-from app.face_detector import has_face   # ✅ ตรวจใบหน้าคนก่อน
+from app.face_detector import count_faces
 
 # =========================
 # FastAPI App
 # =========================
 app = FastAPI(title="BMI AI API")
 
-# ⚠️ ต้องตรงกับจำนวนคลาสของโมเดล
+# 🔴 ต้องให้ตรงกับโมเดลของคุณ
 CLASS_NAMES = ["underweight", "normal", "overweight"]
 
-# confidence ต่ำกว่านี้ = ปฏิเสธ (รูปไม่ชัด / ไม่ใช่คน)
+# confidence ต่ำกว่านี้ = ไม่รับผล
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 
 
 # =========================
-# Health / Root
+# Health
 # =========================
 @app.get("/")
 def root():
-    return {
-        "status": "ok",
-        "service": "BMI AI Backend"
-    }
+    return {"status": "ok", "service": "BMI AI Backend"}
 
 
 @app.get("/health")
@@ -41,13 +38,6 @@ def health():
 # Helper: extract tensor
 # =========================
 def _extract_tensor(output):
-    """
-    รองรับ TorchScript output หลายรูปแบบ:
-    - Tensor
-    - (Tensor,)
-    - [Tensor]
-    - dict ที่มี Tensor
-    """
     if isinstance(output, torch.Tensor):
         return output
 
@@ -69,28 +59,19 @@ def _extract_tensor(output):
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # -------------------------------------------------
         # 1) ตรวจ content-type
-        # -------------------------------------------------
         if file.content_type and not file.content_type.startswith("image/"):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid file type. Please upload an image file."
+                detail="Invalid file type. Please upload an image."
             )
 
-        # -------------------------------------------------
         # 2) อ่านไฟล์
-        # -------------------------------------------------
         image_bytes = await file.read()
         if not image_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail="Empty file. Please upload an image."
-            )
+            raise HTTPException(status_code=400, detail="Empty file")
 
-        # -------------------------------------------------
         # 3) เปิดรูป
-        # -------------------------------------------------
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception:
@@ -99,78 +80,69 @@ async def predict(file: UploadFile = File(...)):
                 detail="Cannot open image. Please upload a valid JPG/PNG file."
             )
 
-        # -------------------------------------------------
-        # 🔒 STEP 1: ตรวจใบหน้าคน (สำคัญที่สุด)
-        # -------------------------------------------------
-        if not has_face(image):
+        # =========================
+        # ❗ ตรวจใบหน้า (สำคัญมาก)
+        # =========================
+        faces = count_faces(image)
+
+        if faces == 0:
             raise HTTPException(
                 status_code=422,
                 detail="No human face detected. Please send a clear face photo."
             )
 
-        # -------------------------------------------------
-        # 4) โหลดโมเดล (cache)
-        # -------------------------------------------------
+        if faces > 1:
+            raise HTTPException(
+                status_code=422,
+                detail="Multiple faces detected. Please send a single-person photo."
+            )
+
+        # =========================
+        # 4) โหลดโมเดล
+        # =========================
         model = get_model()
 
-        # -------------------------------------------------
         # 5) preprocess
-        # -------------------------------------------------
         x = preprocess_image(image)
 
-        # debug log (พอเหมาะ)
-        try:
-            print("✅ Input shape:", tuple(x.shape))
-            print("✅ Input dtype:", x.dtype)
-            print("✅ Input min/max:", float(x.min()), float(x.max()))
-        except Exception:
-            pass
-
-        # -------------------------------------------------
         # 6) inference
-        # -------------------------------------------------
         with torch.no_grad():
             output = model(x)
             logits = _extract_tensor(output)
 
-        # -------------------------------------------------
-        # 7) จัด shape
-        # -------------------------------------------------
         if logits.dim() == 1:
             logits = logits.unsqueeze(0)
 
-        # -------------------------------------------------
-        # 8) Classification
-        # -------------------------------------------------
-        if logits.dim() == 2 and logits.shape[1] > 1:
-            probs = torch.softmax(logits, dim=1)
-            pred = int(torch.argmax(probs, dim=1).item())
-            conf = float(probs[0, pred].item())
-
-            # ❌ confidence ต่ำ → ปฏิเสธ
-            if conf < MIN_CONFIDENCE:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Low confidence. Please send a clearer face photo."
-                )
-
-            class_name = (
-                CLASS_NAMES[pred]
-                if pred < len(CLASS_NAMES)
-                else f"class_{pred}"
+        # =========================
+        # 7) Classification เท่านั้น
+        # =========================
+        if logits.dim() != 2 or logits.shape[1] < 2:
+            raise HTTPException(
+                status_code=500,
+                detail="Unexpected model output shape"
             )
 
-            return {
-                "class_id": pred,
-                "class_name": class_name,
-                "confidence": conf
-            }
+        probs = torch.softmax(logits, dim=1)
+        pred = int(torch.argmax(probs, dim=1).item())
+        conf = float(probs[0, pred].item())
 
-        # -------------------------------------------------
-        # 9) Regression fallback (กรณีโมเดลคืนค่าเดียว)
-        # -------------------------------------------------
-        value = float(logits.squeeze().item())
-        return {"value": value}
+        if conf < MIN_CONFIDENCE:
+            raise HTTPException(
+                status_code=422,
+                detail="Low confidence. Please send a clearer face photo."
+            )
+
+        class_name = (
+            CLASS_NAMES[pred]
+            if pred < len(CLASS_NAMES)
+            else f"class_{pred}"
+        )
+
+        return {
+            "class_id": pred,
+            "class_name": class_name,
+            "confidence": conf
+        }
 
     except HTTPException:
         raise
