@@ -4,4 +4,5 @@ torch
 torchvision
 pillow
 python-multipart
+mediapipe
 opencv-python
