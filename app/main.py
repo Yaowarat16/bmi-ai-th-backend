@@ -9,8 +9,8 @@ from app.model import get_model
 from app.utils import preprocess_image
 from app.face_detector import count_faces
 
-# 👉 เพิ่ม import สำหรับ history
-from app.history import init_db, save_bmi_history
+# 👉 history
+from app.history import init_db, save_bmi_history, get_all_history
 
 
 # =========================
@@ -142,7 +142,7 @@ async def predict(file: UploadFile = File(...)):
         )
 
         # =========================
-        # 🧾 Save History (เก็บประวัติอย่างเดียว)
+        # 🧾 Save History
         # =========================
         save_bmi_history(
             bmi_class=class_name,
@@ -172,3 +172,31 @@ async def predict(file: UploadFile = File(...)):
             status_code=500,
             detail=f"Prediction failed: {str(e)}"
         )
+
+
+# =========================
+# History Endpoint
+# =========================
+@app.get("/history")
+def history(limit: int = 10):
+    """
+    ดูประวัติการทำนาย BMI ล่าสุด
+    ใช้กับ LINE Bot หรือ Frontend
+    """
+    rows = get_all_history(limit)
+
+    results = []
+    for r in rows:
+        results.append({
+            "id": r[0],
+            "bmi_class": r[1],
+            "confidence": r[2],
+            "has_face": bool(r[3]),
+            "face_count": r[4],
+            "created_at": r[5]
+        })
+
+    return {
+        "total": len(results),
+        "history": results
+    }
