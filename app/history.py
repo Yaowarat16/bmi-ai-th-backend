@@ -1,16 +1,19 @@
 import sqlite3
 from datetime import datetime
+import pytz
 
+# =========================
+# Database Config
+# =========================
 DB_PATH = "bmi_history.db"
 
 # =========================
-# Init DB
+# Init Database
 # =========================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # ⭐ schema กลาง (ห้ามเปลี่ยนชื่อ field เอง)
     c.execute("""
         CREATE TABLE IF NOT EXISTS bmi_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,7 +30,7 @@ def init_db():
     conn.close()
 
 # =========================
-# Save history
+# Save BMI History
 # =========================
 def save_bmi_history(
     class_id: int,
@@ -39,8 +42,9 @@ def save_bmi_history(
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # ⭐ ใช้เวลาปัจจุบัน (เวลาที่บอทตอบ)
-    created_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    # ✅ เวลาไทย (UTC+7)
+    tz = pytz.timezone("Asia/Bangkok")
+    created_at = datetime.now(tz).strftime("%d/%m/%Y %H:%M:%S")
 
     c.execute("""
         INSERT INTO bmi_history
@@ -59,7 +63,7 @@ def save_bmi_history(
     conn.close()
 
 # =========================
-# Get history
+# Get BMI History
 # =========================
 def get_bmi_history(limit: int = 10):
     conn = sqlite3.connect(DB_PATH)
@@ -83,7 +87,6 @@ def get_bmi_history(limit: int = 10):
     rows = c.fetchall()
     conn.close()
 
-    # ⭐ ส่งออกเป็น dict พร้อมใช้ใน LINE
     return [
         {
             "id": r["id"],
@@ -92,7 +95,7 @@ def get_bmi_history(limit: int = 10):
             "confidence": r["confidence"],
             "has_face": bool(r["has_face"]),
             "face_count": r["face_count"],
-            "created_at": r["created_at"],
+            "created_at": r["created_at"]
         }
         for r in rows
     ]
