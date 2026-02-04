@@ -8,28 +8,20 @@ import os
 from app.model import get_model
 from app.utils import preprocess_image
 from app.face_detector import count_faces
-
-# 👉 history
-from app.history import init_db, save_bmi_history, get_all_history
-
+from app.history import init_db, save_bmi_history
 
 # =========================
 # FastAPI App
 # =========================
 app = FastAPI(title="BMI AI API")
 
-# =========================
-# Init Database (History)
-# =========================
-# ทำครั้งเดียวตอน API start
+# init database (history)
 init_db()
 
-# ⚠️ ต้องให้จำนวน class ตรงกับโมเดล
-CLASS_NAMES = ["underweight", "normal", "overweight"]
-
-# confidence ต่ำกว่านี้ = เตือน (แต่ไม่ reject)
+# =========================
+# CONFIG
+# =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
-
 
 # =========================
 # Health
@@ -38,83 +30,46 @@ MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 def root():
     return {"status": "ok", "service": "BMI AI Backend"}
 
-
 @app.get("/health")
 def health():
     return {"health": "ok"}
 
-
 # =========================
-# Helper: extract tensor
+# Helper
 # =========================
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
         return output
-
     if isinstance(output, (list, tuple)) and len(output) > 0:
         if isinstance(output[0], torch.Tensor):
             return output[0]
-
     if isinstance(output, dict):
         for v in output.values():
             if isinstance(v, torch.Tensor):
                 return v
-
-    raise TypeError(f"Unsupported model output type: {type(output)}")
-
+    raise TypeError("Unsupported model output")
 
 # =========================
-# Predict Endpoint
+# Predict
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # =========================
-        # 1) ตรวจ content-type
-        # =========================
-        if file.content_type and not file.content_type.startswith("image/"):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid file type. Please upload an image."
-            )
+        # 1) validate file
+        if not file.content_type.startswith("image/"):
+            raise HTTPException(400, "Invalid image")
 
-        # =========================
-        # 2) อ่านไฟล์
-        # =========================
         image_bytes = await file.read()
-        if not image_bytes:
-            raise HTTPException(status_code=400, detail="Empty file")
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        # =========================
-        # 3) เปิดรูป
-        # =========================
-        try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot open image. Please upload a valid JPG/PNG file."
-            )
-
-        # =========================
-        # 🔍 ตรวจใบหน้า (ไม่ reject)
-        # =========================
+        # 2) face detection
         face_count = count_faces(image)
         has_face = face_count >= 1
 
-        # =========================
-        # 4) โหลดโมเดล
-        # =========================
+        # 3) model
         model = get_model()
-
-        # =========================
-        # 5) preprocess
-        # =========================
         x = preprocess_image(image)
 
-        # =========================
-        # 6) inference
-        # =========================
         with torch.no_grad():
             output = model(x)
             logits = _extract_tensor(output)
@@ -122,81 +77,26 @@ async def predict(file: UploadFile = File(...)):
         if logits.dim() == 1:
             logits = logits.unsqueeze(0)
 
-        # =========================
-        # 7) Classification
-        # =========================
-        if logits.dim() != 2 or logits.shape[1] < 2:
-            raise HTTPException(
-                status_code=500,
-                detail="Unexpected model output shape"
-            )
-
         probs = torch.softmax(logits, dim=1)
-        pred = int(torch.argmax(probs, dim=1).item())
-        conf = float(probs[0, pred].item())
+        class_id = int(torch.argmax(probs, dim=1).item())
+        confidence = float(probs[0, class_id].item())
 
-        class_name = (
-            CLASS_NAMES[pred]
-            if pred < len(CLASS_NAMES)
-            else f"class_{pred}"
-        )
-
-        # =========================
-        # 🧾 Save History
-        # =========================
+        # 4) save history (⭐ เก็บ class_id เท่านั้น)
         save_bmi_history(
-            bmi_class=class_name,
-            confidence=conf,
+            class_id=class_id,
+            confidence=confidence,
             has_face=has_face,
             face_count=face_count
         )
 
-        # =========================
-        # ✅ ส่งผลลัพธ์กลับ
-        # =========================
         return {
-            "class_id": pred,
-            "class_name": class_name,
-            "confidence": conf,
+            "class_id": class_id,
+            "confidence": confidence,
             "has_face": has_face,
             "face_count": face_count,
-            "low_confidence": conf < MIN_CONFIDENCE
+            "low_confidence": confidence < MIN_CONFIDENCE
         }
-
-    except HTTPException:
-        raise
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Prediction failed: {str(e)}"
-        )
-
-
-# =========================
-# History Endpoint
-# =========================
-@app.get("/history")
-def history(limit: int = 10):
-    """
-    ดูประวัติการทำนาย BMI ล่าสุด
-    ใช้กับ LINE Bot หรือ Frontend
-    """
-    rows = get_all_history(limit)
-
-    results = []
-    for r in rows:
-        results.append({
-            "id": r[0],
-            "bmi_class": r[1],
-            "confidence": r[2],
-            "has_face": bool(r[3]),
-            "face_count": r[4],
-            "created_at": r[5]
-        })
-
-    return {
-        "total": len(results),
-        "history": results
-    }
+        raise HTTPException(500, f"Prediction failed: {str(e)}")
