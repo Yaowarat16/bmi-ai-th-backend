@@ -25,7 +25,7 @@ init_db()
 # =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 
-# ⭐ กำหนด mapping กลาง (ใช้ทั้งระบบ)
+# ⭐ BMI mapping กลาง (ใช้ทั้ง predict + history)
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
     1: "สมส่วน (BMI 18.5 – 22.9)",
@@ -46,27 +46,30 @@ def health():
     return {"health": "ok"}
 
 # =========================
-# Helper
+# Helper: extract tensor
 # =========================
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
         return output
+
     if isinstance(output, (list, tuple)) and len(output) > 0:
         if isinstance(output[0], torch.Tensor):
             return output[0]
+
     if isinstance(output, dict):
         for v in output.values():
             if isinstance(v, torch.Tensor):
                 return v
+
     raise TypeError("Unsupported model output")
 
 # =========================
-# Predict
+# Predict Endpoint
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # 1) validate file
+        # 1️⃣ Validate file
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid image file")
 
@@ -74,13 +77,16 @@ async def predict(file: UploadFile = File(...)):
         if not image_bytes:
             raise HTTPException(status_code=400, detail="Empty file")
 
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Cannot open image")
 
-        # 2) face detection
+        # 2️⃣ Face detection
         face_count = count_faces(image)
         has_face = face_count >= 1
 
-        # 3) model inference
+        # 3️⃣ Model inference
         model = get_model()
         x = preprocess_image(image)
 
@@ -95,10 +101,13 @@ async def predict(file: UploadFile = File(...)):
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
 
-        # 4) resolve BMI label (⭐ จาก class_id เท่านั้น)
-        bmi_label = BMI_CLASS_LABELS.get(class_id, f"class_{class_id}")
+        # 4️⃣ BMI label จาก class_id เท่านั้น (แก้ปัญหาคลาส/เกณฑ์ปน)
+        bmi_label = BMI_CLASS_LABELS.get(
+            class_id,
+            f"class_{class_id}"
+        )
 
-        # 5) save history (⭐ โครงสร้างเดียวกันทุกครั้ง)
+        # 5️⃣ Save history (โครงสร้างเดียวทุก record)
         save_bmi_history(
             class_id=class_id,
             bmi_label=bmi_label,
@@ -107,7 +116,7 @@ async def predict(file: UploadFile = File(...)):
             face_count=face_count
         )
 
-        # 6) response
+        # 6️⃣ Response
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
@@ -127,7 +136,7 @@ async def predict(file: UploadFile = File(...)):
         )
 
 # =========================
-# History (for LINE / frontend)
+# History Endpoint (LINE / Frontend)
 # =========================
 @app.get("/history")
 def history(limit: int = 5):
