@@ -9,10 +9,20 @@ from app.model import get_model
 from app.utils import preprocess_image
 from app.face_detector import count_faces
 
+# 👉 เพิ่ม import สำหรับ history
+from app.history import init_db, save_bmi_history
+
+
 # =========================
 # FastAPI App
 # =========================
 app = FastAPI(title="BMI AI API")
+
+# =========================
+# Init Database (History)
+# =========================
+# ทำครั้งเดียวตอน API start
+init_db()
 
 # ⚠️ ต้องให้จำนวน class ตรงกับโมเดล
 CLASS_NAMES = ["underweight", "normal", "overweight"]
@@ -59,19 +69,25 @@ def _extract_tensor(output):
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
+        # =========================
         # 1) ตรวจ content-type
+        # =========================
         if file.content_type and not file.content_type.startswith("image/"):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid file type. Please upload an image."
             )
 
+        # =========================
         # 2) อ่านไฟล์
+        # =========================
         image_bytes = await file.read()
         if not image_bytes:
             raise HTTPException(status_code=400, detail="Empty file")
 
+        # =========================
         # 3) เปิดรูป
+        # =========================
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception:
@@ -91,10 +107,14 @@ async def predict(file: UploadFile = File(...)):
         # =========================
         model = get_model()
 
+        # =========================
         # 5) preprocess
+        # =========================
         x = preprocess_image(image)
 
+        # =========================
         # 6) inference
+        # =========================
         with torch.no_grad():
             output = model(x)
             logits = _extract_tensor(output)
@@ -122,7 +142,17 @@ async def predict(file: UploadFile = File(...)):
         )
 
         # =========================
-        # ✅ ส่งผลลัพธ์เสมอ
+        # 🧾 Save History (เก็บประวัติอย่างเดียว)
+        # =========================
+        save_bmi_history(
+            bmi_class=class_name,
+            confidence=conf,
+            has_face=has_face,
+            face_count=face_count
+        )
+
+        # =========================
+        # ✅ ส่งผลลัพธ์กลับ
         # =========================
         return {
             "class_id": pred,
