@@ -1,5 +1,6 @@
 import numpy as np
 import mediapipe as mp
+import cv2
 from PIL import Image
 
 # =========================
@@ -8,46 +9,55 @@ from PIL import Image
 mp_face = mp.solutions.face_detection
 
 _face_detector = mp_face.FaceDetection(
-    model_selection=1,              # 0=ใกล้, 1=ไกล (เหมาะกับมือถือ)
-    min_detection_confidence=0.65   # เพิ่มความแม่น ลด false positive
+    model_selection=1,
+    min_detection_confidence=0.5   # ลดลงเพื่อให้ detect คนใส่แว่นง่ายขึ้น
 )
 
 
 def detect_and_crop_face(
     pil_image: Image.Image,
-    min_area_ratio: float = 0.03,
-    padding_ratio: float = 0.15
+    min_area_ratio: float = 0.02,
+    padding_ratio: float = 0.18
 ):
     """
-    ตรวจจับใบหน้า + crop เฉพาะใบหน้าที่ใหญ่ที่สุด
-
-    Returns:
-        face_pil (PIL.Image or None)
-        face_count (int)
+    ตรวจจับใบหน้า + crop ใบหน้าที่ใหญ่ที่สุด
+    รองรับกรณีใส่แว่น / แสงสะท้อน
     """
 
     img = np.array(pil_image.convert("RGB"))
+
+    # 🔥 เพิ่ม contrast ลดปัญหาแว่นสะท้อน
+    img = cv2.convertScaleAbs(img, alpha=1.25, beta=12)
+
     h, w, _ = img.shape
     img_area = w * h
 
     results = _face_detector.process(img)
 
+    # 🔁 ถ้า detect ไม่เจอ ลองอีกรอบด้วยภาพเดิม (บางภาพช่วยได้)
     if not results.detections:
-        return None, 0
+        results = _face_detector.process(cv2.GaussianBlur(img, (3, 3), 0))
+
+        if not results.detections:
+            return None, 0
 
     valid_faces = []
 
     for detection in results.detections:
         bbox = detection.location_data.relative_bounding_box
 
-        x = int(bbox.xmin * w)
-        y = int(bbox.ymin * h)
+        # กันค่าติดลบจาก mediapipe
+        x = max(0, int(bbox.xmin * w))
+        y = max(0, int(bbox.ymin * h))
         fw = int(bbox.width * w)
         fh = int(bbox.height * h)
 
+        # กันค่าเกินภาพ
+        fw = min(fw, w - x)
+        fh = min(fh, h - y)
+
         area_ratio = (fw * fh) / img_area
 
-        # กรองหน้าที่เล็กเกินไป
         if area_ratio >= min_area_ratio:
             valid_faces.append((x, y, fw, fh))
 
@@ -55,11 +65,10 @@ def detect_and_crop_face(
         return None, 0
 
     # เลือกใบหน้าที่ใหญ่ที่สุด
-    best_face = max(valid_faces, key=lambda f: f[2] * f[3])
-    x, y, fw, fh = best_face
+    x, y, fw, fh = max(valid_faces, key=lambda f: f[2] * f[3])
 
     # =========================
-    # เพิ่ม padding รอบใบหน้า
+    # Padding รอบใบหน้า
     # =========================
     pad_w = int(fw * padding_ratio)
     pad_h = int(fh * padding_ratio)
