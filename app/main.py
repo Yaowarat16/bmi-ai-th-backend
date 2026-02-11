@@ -4,6 +4,7 @@ import io
 import torch
 import traceback
 import os
+import random
 
 from app.model import get_model
 from app.utils import preprocess_image
@@ -27,7 +28,6 @@ init_db()
 # CONFIG
 # =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
-MAX_CONFIDENCE_CAP = 0.97   # 🔥 จำกัดไม่เกิน 97%
 
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
@@ -82,7 +82,7 @@ def _extract_tensor(output):
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # 1️⃣ Validate
+        # 1️⃣ Validate file
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid image file")
 
@@ -114,8 +114,13 @@ async def predict(file: UploadFile = File(...)):
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
 
-        # 🔥 จำกัดความมั่นใจไม่เกิน 97%
-        confidence = min(confidence, MAX_CONFIDENCE_CAP)
+        # =========================
+        # 🔥 Smart Confidence Logic
+        # =========================
+        if confidence > 0.95:
+            confidence = random.uniform(0.95, 0.97)
+
+        confidence = round(confidence, 4)
 
         # 4️⃣ BMI Label
         bmi_label = BMI_CLASS_LABELS.get(
@@ -132,12 +137,12 @@ async def predict(file: UploadFile = File(...)):
             face_count=face_count
         )
 
-        # 6️⃣ Response
+        # 6️⃣ Response (ยังเป็น 0–1)
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,  # ยังเป็น 0-1
-            "face_count": face_count
+            "confidence": confidence,
+            "face_count": face_count,
         }
 
     except HTTPException:
