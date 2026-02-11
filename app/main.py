@@ -16,11 +16,15 @@ from app.history import init_db, save_bmi_history, get_bmi_history
 # FastAPI App
 # =========================
 app = FastAPI(title="BMI AI API")
-
 init_db()
 
+# =========================
+# Config
+# =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.60"))
-TEMPERATURE = 1.3  # 🔥 ลดความมั่นใจไม่ให้พุ่ง 100%
+TEMPERATURE = 1.3
+LOW_MARGIN_THRESHOLD = 0.05
+MAX_CONFIDENCE_CAP = 0.97
 
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
@@ -31,17 +35,17 @@ BMI_CLASS_LABELS = {
 }
 
 # =========================
-# Load Model ครั้งเดียว
+# Load Model
 # =========================
 model = get_model()
 
 # =========================
-# Load MediaPipe Face Detector (Soft Mode)
+# Face Detector (Soft Mode)
 # =========================
 mp_face = mp.solutions.face_detection
 face_detector = mp_face.FaceDetection(
     model_selection=1,
-    min_detection_confidence=0.35  # 🔥 ลดความเข้มงวด
+    min_detection_confidence=0.35
 )
 
 # =========================
@@ -61,23 +65,17 @@ def health():
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
         return output
-
     if isinstance(output, (list, tuple)) and len(output) > 0:
         if isinstance(output[0], torch.Tensor):
             return output[0]
-
     if isinstance(output, dict):
         for v in output.values():
             if isinstance(v, torch.Tensor):
                 return v
-
     raise TypeError("Unsupported model output")
-
 
 def detect_and_crop_face(pil_image, padding_ratio=0.25, min_area_ratio=0.01):
     img = np.array(pil_image.convert("RGB"))
-
-    # 🔥 เพิ่ม contrast ช่วยกรณีใส่แว่น
     img = cv2.convertScaleAbs(img, alpha=1.2, beta=12)
 
     h, w, _ = img.shape
@@ -85,11 +83,9 @@ def detect_and_crop_face(pil_image, padding_ratio=0.25, min_area_ratio=0.01):
 
     results = face_detector.process(img)
 
-    # 🔁 fallback detect รอบสอง (blur)
     if not results.detections:
         img_blur = cv2.GaussianBlur(img, (5, 5), 0)
         results = face_detector.process(img_blur)
-
         if not results.detections:
             return None, 0
 
@@ -106,8 +102,10 @@ def detect_and_crop_face(pil_image, padding_ratio=0.25, min_area_ratio=0.01):
         fw = min(fw, w - x)
         fh = min(fh, h - y)
 
-        area_ratio = (fw * fh) / img_area
+        if fw <= 0 or fh <= 0:
+            continue
 
+        area_ratio = (fw * fh) / img_area
         if area_ratio >= min_area_ratio:
             valid_faces.append((x, y, fw, fh))
 
@@ -147,22 +145,16 @@ async def predict(file: UploadFile = File(...)):
         except Exception:
             raise HTTPException(status_code=400, detail="Cannot open image")
 
-        # Face Detection
         face_image, face_count = detect_and_crop_face(image)
 
         if face_count == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="❌ ไม่พบใบหน้า กรุณาส่งรูปที่เห็นใบหน้าชัดเจน"
-            )
+            raise HTTPException(status_code=400,
+                                detail="❌ ไม่พบใบหน้า กรุณาส่งรูปที่เห็นใบหน้าชัดเจน")
 
         if face_count > 1:
-            raise HTTPException(
-                status_code=400,
-                detail="⚠ กรุณาส่งรูปที่มีเพียง 1 ใบหน้า"
-            )
+            raise HTTPException(status_code=400,
+                                detail="⚠ กรุณาส่งรูปที่มีเพียง 1 ใบหน้า")
 
-        # Model Inference
         x = preprocess_image(face_image)
 
         with torch.no_grad():
@@ -176,14 +168,31 @@ async def predict(file: UploadFile = File(...)):
         scaled_logits = logits / TEMPERATURE
         probs = torch.softmax(scaled_logits, dim=1)
 
-        class_id = int(torch.argmax(probs, dim=1).item())
-        confidence = float(probs[0, class_id].item())
+        # 🔥 Top 2 Logic
+        top2 = torch.topk(probs, 2)
 
-        if confidence < MIN_CONFIDENCE:
+        top1_prob = float(top2.values[0][0].item())
+        top2_prob = float(top2.values[0][1].item())
+
+        class_id = int(top2.indices[0][0].item())
+        margin = top1_prob - top2_prob
+
+        # 🔥 Low Margin Protection
+        if margin < LOW_MARGIN_THRESHOLD:
+            raise HTTPException(
+                status_code=400,
+                detail="⚠ โมเดลไม่มั่นใจ (ผลลัพธ์ใกล้เคียงกัน) กรุณาถ่ายภาพใหม่"
+            )
+
+        # 🔥 Confidence Threshold
+        if top1_prob < MIN_CONFIDENCE:
             raise HTTPException(
                 status_code=400,
                 detail="⚠ ความมั่นใจต่ำ กรุณาลองถ่ายภาพใหม่ให้ชัดขึ้น"
             )
+
+        # 🔥 Hard Cap ไม่ให้เกิน 97%
+        confidence = min(top1_prob, MAX_CONFIDENCE_CAP)
 
         bmi_label = BMI_CLASS_LABELS.get(class_id, f"class_{class_id}")
 
@@ -206,10 +215,8 @@ async def predict(file: UploadFile = File(...)):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Prediction failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500,
+                            detail=f"Prediction failed: {str(e)}")
 
 # =========================
 # History
