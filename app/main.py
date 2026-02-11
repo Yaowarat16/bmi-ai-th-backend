@@ -53,7 +53,7 @@ face_detector = mp_face.FaceDetection(
 # =========================
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "BMI AI Backend"}
+    return {"status": "ok"}
 
 @app.get("/health")
 def health():
@@ -140,10 +140,7 @@ async def predict(file: UploadFile = File(...)):
         if not image_bytes:
             raise HTTPException(status_code=400, detail="Empty file")
 
-        try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except Exception:
-            raise HTTPException(status_code=400, detail="Cannot open image")
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
         face_image, face_count = detect_and_crop_face(image)
 
@@ -151,10 +148,7 @@ async def predict(file: UploadFile = File(...)):
             raise HTTPException(status_code=400,
                                 detail="❌ ไม่พบใบหน้า กรุณาส่งรูปที่เห็นใบหน้าชัดเจน")
 
-        if face_count > 1:
-            raise HTTPException(status_code=400,
-                                detail="⚠ กรุณาส่งรูปที่มีเพียง 1 ใบหน้า")
-
+        # ❗ ไม่ block หลายใบหน้าแล้ว
         x = preprocess_image(face_image)
 
         with torch.no_grad():
@@ -164,11 +158,9 @@ async def predict(file: UploadFile = File(...)):
         if logits.dim() == 1:
             logits = logits.unsqueeze(0)
 
-        # 🔥 Temperature Scaling
         scaled_logits = logits / TEMPERATURE
         probs = torch.softmax(scaled_logits, dim=1)
 
-        # 🔥 Top 2 Logic
         top2 = torch.topk(probs, 2)
 
         top1_prob = float(top2.values[0][0].item())
@@ -177,21 +169,10 @@ async def predict(file: UploadFile = File(...)):
         class_id = int(top2.indices[0][0].item())
         margin = top1_prob - top2_prob
 
-        # 🔥 Low Margin Protection
-        if margin < LOW_MARGIN_THRESHOLD:
-            raise HTTPException(
-                status_code=400,
-                detail="⚠ โมเดลไม่มั่นใจ (ผลลัพธ์ใกล้เคียงกัน) กรุณาถ่ายภาพใหม่"
-            )
+        # 🔥 flags แทนการ block
+        low_margin = margin < LOW_MARGIN_THRESHOLD
+        low_confidence = top1_prob < MIN_CONFIDENCE
 
-        # 🔥 Confidence Threshold
-        if top1_prob < MIN_CONFIDENCE:
-            raise HTTPException(
-                status_code=400,
-                detail="⚠ ความมั่นใจต่ำ กรุณาลองถ่ายภาพใหม่ให้ชัดขึ้น"
-            )
-
-        # 🔥 Hard Cap ไม่ให้เกิน 97%
         confidence = min(top1_prob, MAX_CONFIDENCE_CAP)
 
         bmi_label = BMI_CLASS_LABELS.get(class_id, f"class_{class_id}")
@@ -208,7 +189,9 @@ async def predict(file: UploadFile = File(...)):
             "class_id": class_id,
             "bmi_label": bmi_label,
             "confidence": round(confidence * 100, 2),
-            "face_count": face_count
+            "face_count": face_count,
+            "low_confidence": low_confidence,
+            "low_margin": low_margin
         }
 
     except HTTPException:
