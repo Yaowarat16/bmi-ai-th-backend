@@ -122,11 +122,10 @@ async def predict(file: UploadFile = File(...)):
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,
-            "has_face": has_face,
+            "confidence": confidence,   # ✅ ไม่คูณ 100
             "face_count": face_count,
-            "low_confidence": confidence < MIN_CONFIDENCE
         }
+
 
     except HTTPException:
         raise
