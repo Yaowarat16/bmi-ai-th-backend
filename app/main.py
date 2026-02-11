@@ -14,16 +14,15 @@ from app.history import init_db, save_bmi_history, get_bmi_history
 # FastAPI App
 # =========================
 app = FastAPI(title="BMI AI API")
-
-# =========================
-# Init Database (History)
-# =========================
 init_db()
 
 # =========================
 # CONFIG
 # =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
+TEMPERATURE = 1.2
+LOW_MARGIN_THRESHOLD = 0.05
+MAX_CONFIDENCE_CAP = 0.97
 
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
@@ -34,39 +33,38 @@ BMI_CLASS_LABELS = {
 }
 
 # =========================
-# Health Check
+# Load Model Once
+# =========================
+model = get_model()
+
+# =========================
+# Health
 # =========================
 @app.get("/")
 def root():
     return {"status": "ok", "service": "BMI AI Backend"}
 
-
 @app.get("/health")
 def health():
     return {"health": "ok"}
 
-
 # =========================
-# Helper: Extract Tensor
+# Helper
 # =========================
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
         return output
-
     if isinstance(output, (list, tuple)) and len(output) > 0:
         if isinstance(output[0], torch.Tensor):
             return output[0]
-
     if isinstance(output, dict):
         for v in output.values():
             if isinstance(v, torch.Tensor):
                 return v
-
     raise TypeError("Unsupported model output")
 
-
 # =========================
-# Predict Endpoint
+# Predict
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -89,7 +87,6 @@ async def predict(file: UploadFile = File(...)):
         has_face = face_count >= 1
 
         # 3️⃣ Model Inference
-        model = get_model()
         x = preprocess_image(image)
 
         with torch.no_grad():
@@ -99,17 +96,28 @@ async def predict(file: UploadFile = File(...)):
         if logits.dim() == 1:
             logits = logits.unsqueeze(0)
 
-        probs = torch.softmax(logits, dim=1)
-        class_id = int(torch.argmax(probs, dim=1).item())
-        confidence = float(probs[0, class_id].item())
+        # 🔥 Temperature Scaling
+        scaled_logits = logits / TEMPERATURE
+        probs = torch.softmax(scaled_logits, dim=1)
 
-        # 4️⃣ BMI Label
-        bmi_label = BMI_CLASS_LABELS.get(
-            class_id,
-            f"class_{class_id}"
-        )
+        # 🔥 Top 2 (margin logic)
+        top2 = torch.topk(probs, 2)
+        top1_prob = float(top2.values[0][0].item())
+        top2_prob = float(top2.values[0][1].item())
 
-        # 5️⃣ Save History
+        class_id = int(top2.indices[0][0].item())
+        margin = top1_prob - top2_prob
+
+        # 🔥 Hard Cap confidence
+        confidence = min(top1_prob, MAX_CONFIDENCE_CAP)
+
+        # 🔥 Flags
+        low_confidence = confidence < MIN_CONFIDENCE
+        low_margin = margin < LOW_MARGIN_THRESHOLD
+
+        bmi_label = BMI_CLASS_LABELS.get(class_id, f"class_{class_id}")
+
+        # 4️⃣ Save History
         save_bmi_history(
             class_id=class_id,
             bmi_label=bmi_label,
@@ -118,14 +126,15 @@ async def predict(file: UploadFile = File(...)):
             face_count=face_count
         )
 
-        # 6️⃣ Response
+        # 5️⃣ Response (ไม่ throw error)
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,   # ✅ ไม่คูณ 100
+            "confidence": confidence,   # ยังเป็น 0-1
             "face_count": face_count,
+            "low_confidence": low_confidence,
+            "low_margin": low_margin
         }
-
 
     except HTTPException:
         raise
@@ -136,9 +145,8 @@ async def predict(file: UploadFile = File(...)):
             detail=f"Prediction failed: {str(e)}"
         )
 
-
 # =========================
-# History Endpoint
+# History
 # =========================
 @app.get("/history")
 def history(limit: int = 5):
