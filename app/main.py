@@ -4,10 +4,11 @@ import io
 import torch
 import traceback
 import os
+import cv2
+import numpy as np
 
 from app.model import get_model
 from app.utils import preprocess_image
-from app.face_detector import count_faces
 from app.history import init_db, save_bmi_history, get_bmi_history
 
 # =========================
@@ -15,17 +16,10 @@ from app.history import init_db, save_bmi_history, get_bmi_history
 # =========================
 app = FastAPI(title="BMI AI API")
 
-# =========================
-# Init Database (History)
-# =========================
 init_db()
 
-# =========================
-# CONFIG
-# =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 
-# ⭐ BMI mapping กลาง (ใช้ทั้ง predict + history)
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
     1: "สมส่วน (BMI 18.5 – 22.9)",
@@ -33,6 +27,13 @@ BMI_CLASS_LABELS = {
     3: "อ้วนระดับ 1 (BMI 25.0 – 29.9)",
     4: "อ้วนระดับ 2 (BMI ≥ 30.0)",
 }
+
+# =========================
+# Load Face Cascade ครั้งเดียว
+# =========================
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
 
 # =========================
 # Health
@@ -46,7 +47,7 @@ def health():
     return {"health": "ok"}
 
 # =========================
-# Helper: extract tensor
+# Helper
 # =========================
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
@@ -63,13 +64,40 @@ def _extract_tensor(output):
 
     raise TypeError("Unsupported model output")
 
+
+def detect_and_crop_face(pil_image):
+    """
+    ตรวจจับใบหน้าและ crop เฉพาะใบหน้าที่ใหญ่ที่สุด
+    """
+    img = np.array(pil_image.convert("RGB"))
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.2,
+        minNeighbors=8,
+        minSize=(60, 60)
+    )
+
+    if len(faces) == 0:
+        return None, 0
+
+    # เลือกใบหน้าที่ใหญ่ที่สุด
+    largest_face = max(faces, key=lambda f: f[2] * f[3])
+    x, y, w, h = largest_face
+
+    face_img = img[y:y+h, x:x+w]
+    face_pil = Image.fromarray(face_img)
+
+    return face_pil, len(faces)
+
 # =========================
-# Predict Endpoint
+# Predict
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # 1️⃣ Validate file
+        # 1️⃣ Validate
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid image file")
 
@@ -82,13 +110,24 @@ async def predict(file: UploadFile = File(...)):
         except Exception:
             raise HTTPException(status_code=400, detail="Cannot open image")
 
-        # 2️⃣ Face detection
-        face_count = count_faces(image)
-        has_face = face_count >= 1
+        # 2️⃣ Face detection + crop
+        face_image, face_count = detect_and_crop_face(image)
 
-        # 3️⃣ Model inference
+        if face_count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="❌ ไม่พบใบหน้า กรุณาส่งรูปที่เห็นใบหน้าชัดเจน"
+            )
+
+        if face_count > 1:
+            raise HTTPException(
+                status_code=400,
+                detail="⚠ กรุณาส่งรูปที่มีเพียง 1 ใบหน้า"
+            )
+
+        # 3️⃣ Model inference (ใช้เฉพาะใบหน้า)
         model = get_model()
-        x = preprocess_image(image)
+        x = preprocess_image(face_image)
 
         with torch.no_grad():
             output = model(x)
@@ -101,27 +140,25 @@ async def predict(file: UploadFile = File(...)):
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
 
-        # 4️⃣ BMI label จาก class_id เท่านั้น (แก้ปัญหาคลาส/เกณฑ์ปน)
         bmi_label = BMI_CLASS_LABELS.get(
             class_id,
             f"class_{class_id}"
         )
 
-        # 5️⃣ Save history (โครงสร้างเดียวทุก record)
+        # 4️⃣ Save history
         save_bmi_history(
             class_id=class_id,
             bmi_label=bmi_label,
             confidence=confidence,
-            has_face=has_face,
+            has_face=True,
             face_count=face_count
         )
 
-        # 6️⃣ Response
+        # 5️⃣ Response
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
             "confidence": confidence,
-            "has_face": has_face,
             "face_count": face_count,
             "low_confidence": confidence < MIN_CONFIDENCE
         }
@@ -136,7 +173,7 @@ async def predict(file: UploadFile = File(...)):
         )
 
 # =========================
-# History Endpoint (LINE / Frontend)
+# History
 # =========================
 @app.get("/history")
 def history(limit: int = 5):
