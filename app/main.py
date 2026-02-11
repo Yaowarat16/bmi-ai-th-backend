@@ -27,6 +27,7 @@ init_db()
 # CONFIG
 # =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
+MAX_CONFIDENCE_CAP = 0.97   # 🔥 จำกัดไม่เกิน 97%
 
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
@@ -44,7 +45,7 @@ model = get_model()
 
 
 # =========================
-# Health Check
+# Health
 # =========================
 @app.get("/")
 def root():
@@ -57,7 +58,7 @@ def health():
 
 
 # =========================
-# Helper: Extract Tensor
+# Helper
 # =========================
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
@@ -76,12 +77,12 @@ def _extract_tensor(output):
 
 
 # =========================
-# Predict Endpoint
+# Predict
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # 1️⃣ Validate file
+        # 1️⃣ Validate
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid image file")
 
@@ -113,6 +114,9 @@ async def predict(file: UploadFile = File(...)):
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
 
+        # 🔥 จำกัดความมั่นใจไม่เกิน 97%
+        confidence = min(confidence, MAX_CONFIDENCE_CAP)
+
         # 4️⃣ BMI Label
         bmi_label = BMI_CLASS_LABELS.get(
             class_id,
@@ -132,7 +136,7 @@ async def predict(file: UploadFile = File(...)):
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,   # ยังเป็นค่า 0-1
+            "confidence": confidence,  # ยังเป็น 0-1
             "face_count": face_count
         }
 
@@ -147,7 +151,7 @@ async def predict(file: UploadFile = File(...)):
 
 
 # =========================
-# History Endpoint
+# History
 # =========================
 @app.get("/history")
 def history(limit: int = 5):
