@@ -122,7 +122,7 @@ async def predict(file: UploadFile = File(...)):
             face_count=face_count
         )
 
-        # 6️⃣ Response (0–1)
+        # 6️⃣ Response
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
