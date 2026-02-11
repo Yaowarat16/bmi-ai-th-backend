@@ -4,7 +4,6 @@ import io
 import torch
 import traceback
 import os
-import random
 
 from app.model import get_model
 from app.utils import preprocess_image
@@ -19,7 +18,7 @@ app = FastAPI(title="BMI AI API")
 
 
 # =========================
-# Init Database
+# Init Database (History)
 # =========================
 init_db()
 
@@ -39,13 +38,7 @@ BMI_CLASS_LABELS = {
 
 
 # =========================
-# Load Model Once
-# =========================
-model = get_model()
-
-
-# =========================
-# Health
+# Health Check
 # =========================
 @app.get("/")
 def root():
@@ -58,7 +51,7 @@ def health():
 
 
 # =========================
-# Helper
+# Helper: Extract Tensor
 # =========================
 def _extract_tensor(output):
     if isinstance(output, torch.Tensor):
@@ -77,7 +70,7 @@ def _extract_tensor(output):
 
 
 # =========================
-# Predict
+# Predict Endpoint
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -100,6 +93,7 @@ async def predict(file: UploadFile = File(...)):
         has_face = face_count >= 1
 
         # 3️⃣ Model Inference
+        model = get_model()
         x = preprocess_image(image)
 
         with torch.no_grad():
@@ -110,17 +104,8 @@ async def predict(file: UploadFile = File(...)):
             logits = logits.unsqueeze(0)
 
         probs = torch.softmax(logits, dim=1)
-
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
-
-        # =========================
-        # 🔥 Smart Confidence Logic
-        # =========================
-        if confidence > 0.95:
-            confidence = random.uniform(0.95, 0.97)
-
-        confidence = round(confidence, 4)
 
         # 4️⃣ BMI Label
         bmi_label = BMI_CLASS_LABELS.get(
@@ -137,11 +122,11 @@ async def predict(file: UploadFile = File(...)):
             face_count=face_count
         )
 
-        # 6️⃣ Response (ยังเป็น 0–1)
+        # 6️⃣ Response (0–1)
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,
+            "confidence": confidence,  # ไม่คูณ 100
             "face_count": face_count,
         }
 
@@ -156,7 +141,7 @@ async def predict(file: UploadFile = File(...)):
 
 
 # =========================
-# History
+# History Endpoint
 # =========================
 @app.get("/history")
 def history(limit: int = 5):
