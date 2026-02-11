@@ -6,6 +6,7 @@ import traceback
 import os
 import numpy as np
 import mediapipe as mp
+import cv2
 
 from app.model import get_model
 from app.utils import preprocess_image
@@ -18,7 +19,8 @@ app = FastAPI(title="BMI AI API")
 
 init_db()
 
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.70"))
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.60"))
+TEMPERATURE = 1.3  # 🔥 ลดความมั่นใจไม่ให้พุ่ง 100%
 
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
@@ -34,12 +36,12 @@ BMI_CLASS_LABELS = {
 model = get_model()
 
 # =========================
-# Load MediaPipe Face Detector
+# Load MediaPipe Face Detector (Soft Mode)
 # =========================
 mp_face = mp.solutions.face_detection
 face_detector = mp_face.FaceDetection(
     model_selection=1,
-    min_detection_confidence=0.65
+    min_detection_confidence=0.35  # 🔥 ลดความเข้มงวด
 )
 
 # =========================
@@ -72,25 +74,37 @@ def _extract_tensor(output):
     raise TypeError("Unsupported model output")
 
 
-def detect_and_crop_face(pil_image, padding_ratio=0.15, min_area_ratio=0.03):
+def detect_and_crop_face(pil_image, padding_ratio=0.25, min_area_ratio=0.01):
     img = np.array(pil_image.convert("RGB"))
+
+    # 🔥 เพิ่ม contrast ช่วยกรณีใส่แว่น
+    img = cv2.convertScaleAbs(img, alpha=1.2, beta=12)
+
     h, w, _ = img.shape
     img_area = w * h
 
     results = face_detector.process(img)
 
+    # 🔁 fallback detect รอบสอง (blur)
     if not results.detections:
-        return None, 0
+        img_blur = cv2.GaussianBlur(img, (5, 5), 0)
+        results = face_detector.process(img_blur)
+
+        if not results.detections:
+            return None, 0
 
     valid_faces = []
 
     for detection in results.detections:
         bbox = detection.location_data.relative_bounding_box
 
-        x = int(bbox.xmin * w)
-        y = int(bbox.ymin * h)
+        x = max(0, int(bbox.xmin * w))
+        y = max(0, int(bbox.ymin * h))
         fw = int(bbox.width * w)
         fh = int(bbox.height * h)
+
+        fw = min(fw, w - x)
+        fh = min(fh, h - y)
 
         area_ratio = (fw * fh) / img_area
 
@@ -100,10 +114,8 @@ def detect_and_crop_face(pil_image, padding_ratio=0.15, min_area_ratio=0.03):
     if not valid_faces:
         return None, 0
 
-    # เลือกใบหน้าที่ใหญ่ที่สุด
     x, y, fw, fh = max(valid_faces, key=lambda f: f[2] * f[3])
 
-    # Padding รอบใบหน้า
     pad_w = int(fw * padding_ratio)
     pad_h = int(fh * padding_ratio)
 
@@ -123,7 +135,6 @@ def detect_and_crop_face(pil_image, padding_ratio=0.15, min_area_ratio=0.03):
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # 1️⃣ Validate
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid image file")
 
@@ -136,7 +147,7 @@ async def predict(file: UploadFile = File(...)):
         except Exception:
             raise HTTPException(status_code=400, detail="Cannot open image")
 
-        # 2️⃣ Face Detection
+        # Face Detection
         face_image, face_count = detect_and_crop_face(image)
 
         if face_count == 0:
@@ -151,7 +162,7 @@ async def predict(file: UploadFile = File(...)):
                 detail="⚠ กรุณาส่งรูปที่มีเพียง 1 ใบหน้า"
             )
 
-        # 3️⃣ Model Inference
+        # Model Inference
         x = preprocess_image(face_image)
 
         with torch.no_grad():
@@ -161,7 +172,10 @@ async def predict(file: UploadFile = File(...)):
         if logits.dim() == 1:
             logits = logits.unsqueeze(0)
 
-        probs = torch.softmax(logits, dim=1)
+        # 🔥 Temperature Scaling
+        scaled_logits = logits / TEMPERATURE
+        probs = torch.softmax(scaled_logits, dim=1)
+
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
 
@@ -173,7 +187,6 @@ async def predict(file: UploadFile = File(...)):
 
         bmi_label = BMI_CLASS_LABELS.get(class_id, f"class_{class_id}")
 
-        # 4️⃣ Save history
         save_bmi_history(
             class_id=class_id,
             bmi_label=bmi_label,
@@ -185,7 +198,7 @@ async def predict(file: UploadFile = File(...)):
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,
+            "confidence": round(confidence * 100, 2),
             "face_count": face_count
         }
 
