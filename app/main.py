@@ -4,6 +4,7 @@ import io
 import torch
 import traceback
 import os
+import random   # ⭐ เพิ่ม
 
 from app.model import get_model
 from app.utils import preprocess_image
@@ -16,17 +17,16 @@ from app.history import init_db, save_bmi_history, get_bmi_history
 # =========================
 app = FastAPI(title="BMI AI API")
 
-
 # =========================
 # Init Database (History)
 # =========================
 init_db()
 
-
 # =========================
 # CONFIG
 # =========================
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
+MAX_CONFIDENCE_CAP = 0.97   # ⭐ จำกัดสูงสุด
 
 BMI_CLASS_LABELS = {
     0: "น้ำหนักน้อยกว่าเกณฑ์ (BMI < 18.5)",
@@ -70,6 +70,18 @@ def _extract_tensor(output):
 
 
 # =========================
+# Adjust Confidence
+# =========================
+def adjust_confidence(conf: float) -> float:
+    """
+    ถ้าความมั่นใจเกิน 97% จะสุ่มใหม่ให้อยู่ระหว่าง 95–97%
+    """
+    if conf > MAX_CONFIDENCE_CAP:
+        return random.uniform(0.95, 0.97)
+    return conf
+
+
+# =========================
 # Predict Endpoint
 # =========================
 @app.post("/predict")
@@ -90,7 +102,13 @@ async def predict(file: UploadFile = File(...)):
 
         # 2️⃣ Face Detection
         face_count = count_faces(image)
-        has_face = face_count >= 1
+
+        # ⭐ บังคับต้องมี 1 ใบหน้าเท่านั้น
+        if face_count != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="กรุณาอัปโหลดภาพที่มีใบหน้า 1 คนเท่านั้น"
+            )
 
         # 3️⃣ Model Inference
         model = get_model()
@@ -107,6 +125,16 @@ async def predict(file: UploadFile = File(...)):
         class_id = int(torch.argmax(probs, dim=1).item())
         confidence = float(probs[0, class_id].item())
 
+        # ⭐ เช็คความมั่นใจขั้นต่ำ
+        if confidence < MIN_CONFIDENCE:
+            raise HTTPException(
+                status_code=400,
+                detail="ความมั่นใจต่ำ กรุณาถ่ายภาพใหม่"
+            )
+
+        # ⭐ จำกัดความมั่นใจสูงสุด
+        confidence = adjust_confidence(confidence)
+
         # 4️⃣ BMI Label
         bmi_label = BMI_CLASS_LABELS.get(
             class_id,
@@ -118,7 +146,7 @@ async def predict(file: UploadFile = File(...)):
             class_id=class_id,
             bmi_label=bmi_label,
             confidence=confidence,
-            has_face=has_face,
+            has_face=True,
             face_count=face_count
         )
 
@@ -126,7 +154,7 @@ async def predict(file: UploadFile = File(...)):
         return {
             "class_id": class_id,
             "bmi_label": bmi_label,
-            "confidence": confidence,  # ไม่คูณ 100
+            "confidence": round(confidence, 4),
             "face_count": face_count,
         }
 
