@@ -5,5 +5,5 @@ torchvision
 pillow
 python-multipart
 mediapipe
-opencv-python-headless
+opencv-contrib-python==4.13.0.92
 pytz
